@@ -4,7 +4,13 @@ from drf_toolbox.compat import models
 from drf_toolbox.serializers import ModelSerializer
 from importlib import import_module
 from rest_framework import routers
-from rest_framework.compat import url
+# Must support recent versions of DRF
+# copied from rest_framework.compat (no longer there in recent versions)
+# location of patterns, url, include changes in 1.4 onwards
+try:
+    from django.conf.urls import patterns, url, include
+except ImportError:
+    from django.conf.urls.defaults import patterns, url, include
 from rest_framework.settings import api_settings
 import re
 import six
@@ -146,8 +152,19 @@ class Router(routers.DefaultRouter):
         # This router is the child of another router; that means
         # that it must be prefixed with the detail route from the
         # parent router.
+        # Must support recent versions of DRF
+        # The parent's detail route is not always at position [1],
+        # so find the first instance of Route type, with a lookup field
         parent_routes = self.parent.get_preformatted_routes(lookup_prefix)
-        parent_url_prefix = parent_routes[1].url.format(
+        parent_detail_route = None
+        for route in parent_routes:
+            if isinstance(route, routers.Route) and '{lookup}' in route.url:
+                parent_detail_route = route
+                break
+        if parent_detail_route is None:
+            raise ValueError('Parent viewset has no detail route.')
+                                       
+        parent_url_prefix = parent_detail_route.url.format(
             prefix=self.parent_prefix,
             lookup=self.parent.get_lookup_regex(self.parent_viewset,
                 lookup_prefix=lookup_prefix,
@@ -157,14 +174,28 @@ class Router(routers.DefaultRouter):
 
         # Generate Route tuples corresponding to the parent's route tuples,
         # but with the parent prefix prepended.
+        # Must support recent versions of DRF
         answer = []
         for route in super(Router, self).routes:
-            answer.append(routers.Route(
-                url=parent_url_prefix + route.url.lstrip('^'),
-                mapping=route.mapping,
-                name=route.name,
-                initkwargs=route.initkwargs,
-            ))
+            if isinstance(route, routers.DynamicListRoute):
+                answer.append(routers.DynamicListRoute(
+                    url=parent_url_prefix + route.url.lstrip('^'),
+                    name=route.name,
+                    initkwargs=route.initkwargs,
+                ))
+            elif isinstance(route, routers.DynamicDetailRoute):
+                answer.append(routers.DynamicDetailRoute(
+                    url=parent_url_prefix + route.url.lstrip('^'),
+                    name=route.name,
+                    initkwargs=route.initkwargs,
+                ))
+            else:
+                answer.append(routers.Route(
+                    url=parent_url_prefix + route.url.lstrip('^'),
+                    mapping=route.mapping,
+                    name=route.name,
+                    initkwargs=route.initkwargs,
+                ))
         return answer
 
     def get_routes(self, viewset):
@@ -186,11 +217,13 @@ class Router(routers.DefaultRouter):
 
             # Sanity check: If this viewset method doesn't have a
             # `base_http_methods` attribute, we're done.
-            if not hasattr(method, 'base_http_methods'):
+            # Must support recent versions of DRF
+            bind_methods = getattr(method, 'base_http_methods', getattr(method, 'bind_to_methods', None))
+            if bind_methods is None:
                 continue
 
             # Determine the HTTP methods, URL pattern, and name pattern.
-            http_methods = [i.lower() for i in method.base_http_methods]
+            http_methods = [i.lower() for i in bind_methods]
             url_format = r'^{prefix}/{methodname}{trailing_slash}$'
             url = routers.replace_methodname(url_format, method_name)
             name_format = '{basename}-{methodnamehyphen}' 
